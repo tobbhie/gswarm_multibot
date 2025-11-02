@@ -194,12 +194,6 @@ If you see `GSwarm binary not found in PATH`, ensure:
 - **Error Handling**: The bot continues running even if individual message sends fail
 - **Auto-Cleanup**: Sessions are automatically cleaned up when processes exit or timeout
 
-## 🔐 Security Considerations
-
-- **Never commit your bot token** to version control
-- Use environment variables for sensitive configuration
-- The Dockerfile includes a token in ENV (should be removed in production - use secrets instead)
-
 ## 📄 License
 
 This project wraps the GSwarm service. Please refer to:

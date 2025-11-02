@@ -145,8 +145,7 @@ async def start_session(chat_id: int, evm_address: str):
 
 
 async def monitor_gswarm_output(proc: asyncio.subprocess.Process, chat_id: int):
-    """Asynchronously read gswarm stdout and react (auto /verify and detect success)."""
-    # regexes or substrings to detect verification code and success messages
+    """Asynchronously read gswarm stdout and react (auto /verify, detect success, handle errors)."""
     import re
     verify_re = re.compile(r"verify\s+code[:\s]+([A-Za-z0-9\-]+)", re.IGNORECASE)
     success_indicators = [
@@ -154,6 +153,8 @@ async def monitor_gswarm_output(proc: asyncio.subprocess.Process, chat_id: int):
         "accounts linked successfully",
         "you can now use both discord and telegram",
     ]
+    # Add pattern for missing peer IDs
+    no_peerid_pattern = re.compile(r"no peer ids found for address", re.IGNORECASE)
 
     try:
         # read lines until process finishes
@@ -162,7 +163,7 @@ async def monitor_gswarm_output(proc: asyncio.subprocess.Process, chat_id: int):
             if not line_bytes:
                 break
             line = line_bytes.decode("utf-8", errors="ignore").strip()
-            print(f"[gswarm] {line}", flush=True)  # docker logs
+            print(f"[gswarm] {line}", flush=True)
 
             # detect verify code and auto-send /verify <code>
             m = verify_re.search(line)
@@ -171,18 +172,28 @@ async def monitor_gswarm_output(proc: asyncio.subprocess.Process, chat_id: int):
                 await send_safe(chat_id, f"/verify {code}")
                 await send_safe(chat_id, f"✅ Auto-sent verification code: `{code}`", parse_mode="Markdown")
 
-            # detect success messages to auto-close session and start next
             lower = line.lower()
+
+            # detect "no peer IDs found" and handle gracefully
+            if no_peerid_pattern.search(lower):
+                await send_safe(
+                    chat_id,
+                    "⚠️ No peer IDs found for this EOA on-chain.\n\n"
+                    "This means the address isn’t registered with GSwarm.\n"
+                    "Please send another valid EVM address to start monitoring."
+                )
+                await stop_active_session("No peer IDs found for this address.")
+                return
+
+            # detect success messages to auto-close session and start next
             if any(ind in lower for ind in success_indicators):
                 await send_safe(chat_id, "🎉 Account successfully linked with Discord! Ending session...")
-                # gracefully stop the active process and advance queue
                 await stop_active_session("✅ Account linked successfully. Session closed.")
                 return
 
     except Exception as e:
         print("[supervisor] monitor_gswarm_output exception:", e, flush=True)
     finally:
-        # if process ends (EOF), ensure we clear session and start next
         if active_session.get("proc") is proc:
             await stop_active_session("GSwarm process exited.")
 
