@@ -117,6 +117,7 @@ async def start_session(chat_id: int, evm_address: str):
         proc = await asyncio.create_subprocess_exec(
             GSWARM_CMD,
             f"--telegram-config-path={USER_CONFIG_PATH}",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
@@ -225,25 +226,36 @@ async def cmd_stop(message: types.Message):
 
 @dp.message()
 async def handle_message(message: types.Message):
-    """Single handler for all non-command messages.
-       - If active user sends anything -> refresh timeout.
-       - If message looks like EVM address -> attempt to start (or enqueue).
-       - Otherwise respond with help text for starting.
-    """
+    """Handle all non-command messages intelligently."""
     chat_id = message.chat.id
     text = (message.text or "").strip()
 
-    # refresh active user's last_active for any message they send
+    # refresh active user's last_active
     if active_session["chat_id"] == chat_id:
         active_session["last_active"] = datetime.utcnow()
 
-    # if text looks like an EOA address then start/queue
+    # handle /verify <code> — forward to gswarm
+    if text.lower().startswith("/verify"):
+        proc = active_session.get("proc")
+        if proc:
+            try:
+                # send the verify command into gswarm's stdin
+                proc.stdin.write((text + "\n").encode())
+                await proc.stdin.drain()
+                await message.answer("✅ Verification command sent to GSwarm.")
+            except Exception as e:
+                await message.answer(f"⚠️ Failed to send verify command: {e}")
+        else:
+            await message.answer("ℹ️ No active session to verify. Please start with /start.")
+        return
+
+    # if message looks like an EVM address
     if text.startswith("0x") and len(text) == 42:
         await start_session(chat_id, text)
         return
 
-    # helpful prompt for other messages
     await message.answer("⚠️ To start monitoring, send your EVM address (starting with 0x). Use /stop to end your active session.")
+
 
 
 # ----------------- run -----------------
