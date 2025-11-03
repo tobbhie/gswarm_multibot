@@ -1,9 +1,28 @@
 import os
 import json
 import asyncio
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+
+# --- Dummy server for Render: Had to Do it cos I am using the free tier ---
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))  # Render injects PORT automatically
+    server = HTTPServer(("0.0.0.0", port), PingHandler)
+    print(f"[server] Dummy health server running on port {port}")
+    server.serve_forever()
+
+# Run dummy HTTP server in background thread so bot logic still runs
+threading.Thread(target=start_dummy_server, daemon=True).start()
 
 # ----------------- config -----------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
