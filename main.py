@@ -13,8 +13,9 @@ if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
 
 PORT = int(os.environ.get("PORT", 10000))  # Render injects PORT automatically
+HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "gswarm-multibot.onrender.com")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'gswarm-multibot.onrender.com')}{WEBHOOK_PATH}"
+WEBHOOK_URL = f"https://{HOSTNAME}{WEBHOOK_PATH}"
 
 USER_CONFIG_PATH = "/app/telegram-config.json"
 GSWARM_CMD = "gswarm"
@@ -22,6 +23,9 @@ SESSION_TIMEOUT = timedelta(minutes=10)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# This will hold the asyncio loop reference (set in main())
+asyncio_loop = None
 
 # ----------------- Global session state -----------------
 active_session = {"chat_id": None, "proc": None, "last_active": None}
@@ -101,6 +105,7 @@ async def start_session(chat_id: int, evm_address: str):
         proc = await asyncio.create_subprocess_exec(
             GSWARM_CMD,
             f"--telegram-config-path={USER_CONFIG_PATH}",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
@@ -179,9 +184,12 @@ async def handle_message(message: types.Message):
     if text.lower().startswith("/verify"):
         proc = active_session.get("proc")
         if proc:
-            proc.stdin.write((text + "\n").encode())
-            await proc.stdin.drain()
-            await message.answer("✅ Verification command sent to GSwarm.")
+            try:
+                proc.stdin.write((text + "\n").encode())
+                await proc.stdin.drain()
+                await message.answer("✅ Verification command sent to GSwarm.")
+            except Exception as e:
+                await message.answer(f"⚠️ Failed to send verify command: {e}")
         else:
             await message.answer("ℹ️ No active session.")
         return
@@ -195,20 +203,41 @@ async def handle_message(message: types.Message):
 # ----------------- Webhook HTTP Handler -----------------
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Health check (optional)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
 
     def do_POST(self):
+        # Only accept Telegram updates at the configured path
         if self.path != WEBHOOK_PATH:
             self.send_response(404)
             self.end_headers()
             return
+
         content_length = int(self.headers.get('content-length', 0))
         body = self.rfile.read(content_length)
-        asyncio.run(dp.feed_update(bot, body))
-        self.send_response(200)
-        self.end_headers()
+
+        # Parse incoming JSON to aiogram.types.Update and schedule it on the main asyncio loop
+        try:
+            payload = body.decode("utf-8")
+            # model_validate_json is available on aiogram's pydantic models
+            update_obj = types.Update.model_validate_json(payload)
+
+            # schedule feeding the update into dispatcher on the running loop
+            if asyncio_loop is None:
+                # should not happen, but handle gracefully
+                print("[webhook] asyncio loop not set - cannot process update")
+            else:
+                # fire-and-forget: we don't block the HTTP handler waiting for dp to finish
+                asyncio.run_coroutine_threadsafe(dp.feed_update(bot, update_obj), asyncio_loop)
+
+            self.send_response(200)
+            self.end_headers()
+        except Exception as e:
+            print(f"[webhook] Failed to process update: {e}", flush=True)
+            self.send_response(500)
+            self.end_headers()
 
 
 def run_server():
@@ -219,12 +248,31 @@ def run_server():
 
 # ----------------- Main entry -----------------
 async def on_startup():
+    # set webhook so Telegram knows where to POST updates
     await bot.set_webhook(WEBHOOK_URL)
     print(f"✅ Webhook set to {WEBHOOK_URL}", flush=True)
+    # start session timeout checker
     asyncio.create_task(session_timeout_checker())
 
 
+async def main():
+    global asyncio_loop
+    asyncio_loop = asyncio.get_running_loop()
+
+    # Ensure webhook is registered and the background logic starts
+    await on_startup()
+
+    # start HTTP webhook server in a background thread so it's non-blocking
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+
+    # keep the main coroutine alive (dispatcher will be triggered by incoming webhook calls)
+    print("🚀 Supervisor is running (webhook mode).", flush=True)
+    await asyncio.Event().wait()  # never finish
+
+
 if __name__ == "__main__":
-    # Set webhook before starting the HTTP server
-    asyncio.run(on_startup())
-    run_server()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Shutting down...")
