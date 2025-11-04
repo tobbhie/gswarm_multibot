@@ -134,8 +134,19 @@ async def monitor_gswarm_output(proc, chat_id):
 
             if verify_re.search(line):
                 code = verify_re.search(line).group(1)
-                await send_safe(chat_id, f"/verify {code}")
-                await send_safe(chat_id, f"✅ Auto-sent verification code: `{code}`", parse_mode="Markdown")
+                # Send verification code directly to GSwarm stdin
+                try:
+                    if proc.stdin and proc.returncode is None:
+                        verify_command = f"/verify {code}\n"
+                        proc.stdin.write(verify_command.encode('utf-8'))
+                        await proc.stdin.drain()
+                        print(f"[supervisor] Auto-sent verification code to GSwarm: {code}", flush=True)
+                        await send_safe(chat_id, f"✅ Auto-sent verification code: `{code}`", parse_mode="Markdown")
+                    else:
+                        await send_safe(chat_id, f"⚠️ Detected verification code: `{code}` but GSwarm process unavailable. Please send manually.", parse_mode="Markdown")
+                except Exception as e:
+                    print(f"[supervisor] Failed to auto-send verification code: {e}", flush=True)
+                    await send_safe(chat_id, f"⚠️ Detected verification code: `{code}` but failed to send. Please send `/verify {code}` manually.", parse_mode="Markdown")
 
             if no_peerid_pattern.search(line):
                 await send_safe(chat_id, "⚠️ No peer IDs found. Please use a valid EVM address.")
@@ -183,15 +194,28 @@ async def handle_message(message: types.Message):
 
     if text.lower().startswith("/verify"):
         proc = active_session.get("proc")
-        if proc:
+        if proc and proc.stdin:
             try:
-                proc.stdin.write((text + "\n").encode())
+                # Check if process is still running
+                if proc.returncode is not None:
+                    await message.answer("⚠️ GSwarm process has exited. Please restart with /start.")
+                    return
+                
+                # Extract code from "/verify code" or use the full text
+                # Send the full command as GSwarm might expect it
+                command = text + "\n"
+                proc.stdin.write(command.encode('utf-8'))
                 await proc.stdin.drain()
+                print(f"[supervisor] Sent to GSwarm stdin: {command.strip()}", flush=True)
                 await message.answer("✅ Verification command sent to GSwarm.")
+            except BrokenPipeError:
+                await message.answer("⚠️ GSwarm process stdin is closed. The process may have exited.")
+                print("[supervisor] BrokenPipeError: stdin closed", flush=True)
             except Exception as e:
                 await message.answer(f"⚠️ Failed to send verify command: {e}")
+                print(f"[supervisor] Error sending verify command: {e}", flush=True)
         else:
-            await message.answer("ℹ️ No active session.")
+            await message.answer("ℹ️ No active session or GSwarm process not available.")
         return
 
     if text.startswith("0x") and len(text) == 42:
