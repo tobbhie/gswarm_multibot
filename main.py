@@ -1,14 +1,15 @@
 import os
 import json
 import asyncio
-import os
 import threading
+import time
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# --- Dummy server for Render: Had to Do it cos I am using the free tier ---
+# --- Dummy server + Self-ping just for Render free tier ---
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -16,13 +17,31 @@ class PingHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 def start_dummy_server():
-    port = int(os.environ.get("PORT", 10000))  # Render injects PORT automatically
+    """Run a minimal web server required by Render's port binding."""
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), PingHandler)
     print(f"[server] Dummy health server running on port {port}")
     server.serve_forever()
 
-# Run dummy HTTP server in background thread so bot logic still runs
+def self_ping():
+    """Continuously ping the app to prevent Render from idling."""
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        print("[self-ping] No RENDER_EXTERNAL_URL found. Skipping self-ping.")
+        return
+
+    print(f"[self-ping] Starting self-ping loop for {url}")
+    while True:
+        try:
+            requests.get(url, timeout=5)
+            print(f"[self-ping] Pinged {url}")
+        except Exception as e:
+            print(f"[self-ping] Failed to ping: {e}")
+        time.sleep(240)  # every 4 minutes
+
+# Run both background threads
 threading.Thread(target=start_dummy_server, daemon=True).start()
+threading.Thread(target=self_ping, daemon=True).start()
 
 # ----------------- config -----------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
