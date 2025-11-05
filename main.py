@@ -208,6 +208,30 @@ async def main():
         print(f"❌ Failed to connect to Telegram API: {e}", flush=True)
         raise
     
+    # Delete any existing webhook (we're using polling, not webhooks)
+    # This is CRITICAL - if a webhook exists, polling won't receive updates!
+    try:
+        webhook_info = await bot.get_webhook_info()
+        if webhook_info.url:
+            print(f"⚠️ Found existing webhook: {webhook_info.url}", flush=True)
+            await bot.delete_webhook(drop_pending_updates=True)
+            # Verify deletion
+            webhook_info = await bot.get_webhook_info()
+            if not webhook_info.url:
+                print("✅ Webhook deleted successfully", flush=True)
+            else:
+                print(f"❌ ERROR: Webhook still exists after deletion attempt!", flush=True)
+        else:
+            print("✅ No webhook found (already using polling)", flush=True)
+    except Exception as e:
+        print(f"⚠️ Warning: Could not check/delete webhook: {e}", flush=True)
+        # Try to delete anyway
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            print("✅ Deleted webhook (no verification)", flush=True)
+        except:
+            pass
+    
     # Start Flask health check server
     keep_alive()
     
@@ -217,9 +241,17 @@ async def main():
     # Start polling
     try:
         print("Starting Telegram bot polling...", flush=True)
+        # Verify no webhook before polling
+        webhook_info = await bot.get_webhook_info()
+        if webhook_info.url:
+            print(f"❌ CRITICAL: Webhook still active: {webhook_info.url}. Polling will not work!", flush=True)
+            raise RuntimeError(f"Webhook still active: {webhook_info.url}. Cannot start polling.")
+        
+        print("✅ Confirmed no webhook - starting polling...", flush=True)
         await dp.start_polling(bot, skip_updates=True)
+        print("Polling started successfully", flush=True)
     except Exception as e:
-        print(f"Error in polling: {e}", flush=True)
+        print(f"❌ Error in polling: {e}", flush=True)
         raise
     finally:
         await bot.session.close()
