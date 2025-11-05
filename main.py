@@ -147,7 +147,13 @@ async def monitor_gswarm_output(proc, chat_id):
 # ----------------- Telegram handlers -----------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Welcome! Send your EVM address (0x...) to start monitoring.")
+    print(f"[handler] /start command received from {message.chat.id}", flush=True)
+    try:
+        await message.answer("👋 Welcome! Send your EVM address (0x...) to start monitoring.")
+        print(f"[handler] /start response sent successfully", flush=True)
+    except Exception as e:
+        print(f"[handler] Error in /start handler: {e}", flush=True)
+        raise
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
@@ -167,6 +173,7 @@ async def cmd_stop(message: types.Message):
 async def handle_message(message: types.Message):
     chat_id = message.chat.id
     text = (message.text or "").strip()
+    print(f"[handler] Message received: chat_id={chat_id}, text={text[:50]}", flush=True)
     if active_session["chat_id"] == chat_id:
         active_session["last_active"] = datetime.utcnow()
 
@@ -191,12 +198,37 @@ async def handle_message(message: types.Message):
 # ----------------- Main -----------------
 async def main():
     print("🚀 Starting bot in polling mode...", flush=True)
+    print(f"Bot token present: {bool(BOT_TOKEN)}", flush=True)
+    
+    # Verify bot can connect to Telegram API
+    try:
+        bot_info = await bot.get_me()
+        print(f"✅ Bot connected successfully: @{bot_info.username} (ID: {bot_info.id})", flush=True)
+    except Exception as e:
+        print(f"❌ Failed to connect to Telegram API: {e}", flush=True)
+        raise
+    
+    # Start Flask health check server
     keep_alive()
+    
+    # Start session timeout checker
     asyncio.create_task(session_timeout_checker())
-    await dp.start_polling(bot)
+    
+    # Start polling
+    try:
+        print("Starting Telegram bot polling...", flush=True)
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        print(f"Error in polling: {e}", flush=True)
+        raise
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Shutting down...")
+        print("Shutting down...", flush=True)
+    except Exception as e:
+        print(f"Fatal error: {e}", flush=True)
+        raise
