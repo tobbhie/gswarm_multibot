@@ -105,6 +105,8 @@ async def monitor_gswarm_output(proc, chat_id):
     verify_re = re.compile(r"verify\s+code[:\s]+([A-Za-z0-9\-]+)", re.IGNORECASE)
     success_indicators = ["account successfully linked", "accounts linked successfully"]
     no_peerid_pattern = re.compile(r"no peer ids found for address", re.IGNORECASE)
+    error_patterns = [re.compile(r"error", re.IGNORECASE), re.compile(r"failed", re.IGNORECASE), re.compile(r"invalid", re.IGNORECASE)]
+    verify_response_pattern = re.compile(r"verify|verification|code|linked|success", re.IGNORECASE)
 
     try:
         while True:
@@ -113,6 +115,11 @@ async def monitor_gswarm_output(proc, chat_id):
                 break
             line = line.decode("utf-8", errors="ignore").strip()
             print(f"[gswarm] {line}", flush=True)
+            
+            # Forward important responses to user (especially verification-related)
+            # Also forward errors and success messages
+            if verify_response_pattern.search(line) or any(pattern.search(line) for pattern in error_patterns):
+                await send_safe(chat_id, f"📨 GSwarm: {line}")
 
             if verify_re.search(line):
                 code = verify_re.search(line).group(1)
@@ -181,11 +188,27 @@ async def handle_message(message: types.Message):
         proc = active_session.get("proc")
         if proc and proc.stdin and proc.returncode is None:
             try:
-                proc.stdin.write((text + "\n").encode("utf-8"))
+                # Extract code from "/verify CODE"
+                parts = text.split()
+                if len(parts) >= 2:
+                    code = parts[1]
+                    # Send full command format (GSwarm likely expects "/verify CODE")
+                    command = f"/verify {code}\n"
+                else:
+                    # If no code provided, send the full command as-is
+                    command = text + "\n"
+                
+                print(f"[supervisor] Sending to GSwarm stdin: {repr(command)}", flush=True)
+                proc.stdin.write(command.encode("utf-8"))
                 await proc.stdin.drain()
-                await message.answer("✅ Verification command sent to GSwarm.")
+                print(f"[supervisor] Command sent and drained", flush=True)
+                await message.answer("✅ Verification command sent to GSwarm. Waiting for response...")
+            except BrokenPipeError:
+                await message.answer("⚠️ GSwarm process stdin is closed. The process may have exited.")
+                print("[supervisor] BrokenPipeError: stdin closed", flush=True)
             except Exception as e:
                 await message.answer(f"⚠️ Failed to send verify command: {e}")
+                print(f"[supervisor] Error sending verify command: {e}", flush=True)
         else:
             await message.answer("ℹ️ No active session or GSwarm process unavailable.")
         return
