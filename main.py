@@ -6,6 +6,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+import requests
 
 # ----------------- Config -----------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -196,18 +197,36 @@ async def handle_message(message: types.Message):
         proc = active_session.get("proc")
         if proc and proc.stdin:
             try:
-                # Check if process is still running
                 if proc.returncode is not None:
                     await message.answer("⚠️ GSwarm process has exited. Please restart with /start.")
                     return
-                
-                # Extract code from "/verify code" or use the full text
-                # Send the full command as GSwarm might expect it
+
+                # 1️⃣ Disable Telegram webhook temporarily
+                try:
+                    resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+                    print(f"[webhook] Deleted webhook temporarily — status {resp.status_code}")
+                except Exception as e:
+                    print(f"[webhook] Failed to delete webhook: {e}")
+
+                # 2️⃣ Forward verification command to GSwarm
                 command = text + "\n"
-                proc.stdin.write(command.encode('utf-8'))
+                proc.stdin.write(command.encode("utf-8"))
                 await proc.stdin.drain()
                 print(f"[supervisor] Sent to GSwarm stdin: {command.strip()}", flush=True)
-                await message.answer("✅ Verification command sent to GSwarm.")
+                await message.answer("✅ Verification command sent to GSwarm. Webhook temporarily disabled to allow verification.")
+
+                # 3️⃣ Wait a few seconds to let GSwarm finish (optional safeguard)
+                await asyncio.sleep(5)
+
+                # 4️⃣ Re-enable webhook for continued bot operation
+                try:
+                    resp = requests.get(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}"
+                    )
+                    print(f"[webhook] Restored webhook — status {resp.status_code}")
+                except Exception as e:
+                    print(f"[webhook] Failed to restore webhook: {e}")
+
             except BrokenPipeError:
                 await message.answer("⚠️ GSwarm process stdin is closed. The process may have exited.")
                 print("[supervisor] BrokenPipeError: stdin closed", flush=True)
