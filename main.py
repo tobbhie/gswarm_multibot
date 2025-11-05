@@ -1,10 +1,11 @@
 import os
 import json
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from keep_alive import keep_alive
+from keep_alive import keep_alive, init_webhook
 
 
 # ----------------- Config -----------------
@@ -12,9 +13,17 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
 
+PORT = int(os.environ.get("PORT", 8080))
+HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "gswarm-multibot.onrender.com")
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"https://{HOSTNAME}{WEBHOOK_PATH}"
+
 USER_CONFIG_PATH = "/app/telegram-config.json"
 GSWARM_CMD = "gswarm"
 SESSION_TIMEOUT = timedelta(minutes=10)
+
+# This will hold the asyncio loop reference (set in main())
+asyncio_loop = None
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -154,10 +163,10 @@ async def monitor_gswarm_output(proc, chat_id):
 # ----------------- Telegram handlers -----------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    print(f"[handler] /start command received from {message.chat.id}", flush=True)
+    print(f"[handler] /start command received from chat_id={message.chat.id}", flush=True)
     try:
         await message.answer("👋 Welcome! Send your EVM address (0x...) to start monitoring.")
-        print(f"[handler] /start response sent successfully", flush=True)
+        print(f"[handler] /start response sent successfully to chat_id={message.chat.id}", flush=True)
     except Exception as e:
         print(f"[handler] Error in /start handler: {e}", flush=True)
         raise
@@ -180,7 +189,7 @@ async def cmd_stop(message: types.Message):
 async def handle_message(message: types.Message):
     chat_id = message.chat.id
     text = (message.text or "").strip()
-    print(f"[handler] Message received: chat_id={chat_id}, text={text[:50]}", flush=True)
+    print(f"[handler] Message received: chat_id={chat_id}, text_length={len(text)}", flush=True)
     if active_session["chat_id"] == chat_id:
         active_session["last_active"] = datetime.utcnow()
 
@@ -220,64 +229,49 @@ async def handle_message(message: types.Message):
 
 # ----------------- Main -----------------
 async def main():
-    print("🚀 Starting bot in polling mode...", flush=True)
-    print(f"Bot token present: {bool(BOT_TOKEN)}", flush=True)
+    global asyncio_loop
+    asyncio_loop = asyncio.get_running_loop()
+    
+    print("🚀 Starting bot in webhook mode...", flush=True)
+    print(f"[config] Bot token present: {bool(BOT_TOKEN)}", flush=True)
+    print(f"[config] Webhook URL: {WEBHOOK_URL}", flush=True)
+    print(f"[config] Webhook path: {WEBHOOK_PATH}", flush=True)
     
     # Verify bot can connect to Telegram API
     try:
         bot_info = await bot.get_me()
-        print(f"✅ Bot connected successfully: @{bot_info.username} (ID: {bot_info.id})", flush=True)
+        print(f"[bot] Connected successfully: @{bot_info.username} (ID: {bot_info.id})", flush=True)
     except Exception as e:
-        print(f"❌ Failed to connect to Telegram API: {e}", flush=True)
+        print(f"[bot] Failed to connect to Telegram API: {e}", flush=True)
         raise
     
-    # Delete any existing webhook (we're using polling, not webhooks)
-    # This is CRITICAL - if a webhook exists, polling won't receive updates!
+    # Set webhook
     try:
+        print(f"[webhook] Setting webhook to {WEBHOOK_URL}...", flush=True)
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
         webhook_info = await bot.get_webhook_info()
-        if webhook_info.url:
-            print(f"⚠️ Found existing webhook: {webhook_info.url}", flush=True)
-            await bot.delete_webhook(drop_pending_updates=True)
-            # Verify deletion
-            webhook_info = await bot.get_webhook_info()
-            if not webhook_info.url:
-                print("✅ Webhook deleted successfully", flush=True)
-            else:
-                print(f"❌ ERROR: Webhook still exists after deletion attempt!", flush=True)
+        if webhook_info.url == WEBHOOK_URL:
+            print(f"[webhook] ✅ Webhook set successfully", flush=True)
         else:
-            print("✅ No webhook found (already using polling)", flush=True)
+            print(f"[webhook] ⚠️ Webhook URL mismatch. Expected: {WEBHOOK_URL}, Got: {webhook_info.url}", flush=True)
     except Exception as e:
-        print(f"⚠️ Warning: Could not check/delete webhook: {e}", flush=True)
-        # Try to delete anyway
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            print("✅ Deleted webhook (no verification)", flush=True)
-        except:
-            pass
+        print(f"[webhook] ❌ Failed to set webhook: {e}", flush=True)
+        raise
     
-    # Start Flask health check server
+    # Initialize webhook handler with bot and dispatcher
+    init_webhook(bot, dp, asyncio_loop)
+    
+    # Start Flask server with webhook handler
+    print(f"[server] Starting Flask server on port {PORT}...", flush=True)
     keep_alive()
     
     # Start session timeout checker
     asyncio.create_task(session_timeout_checker())
+    print("[supervisor] Session timeout checker started", flush=True)
     
-    # Start polling
-    try:
-        print("Starting Telegram bot polling...", flush=True)
-        # Verify no webhook before polling
-        webhook_info = await bot.get_webhook_info()
-        if webhook_info.url:
-            print(f"❌ CRITICAL: Webhook still active: {webhook_info.url}. Polling will not work!", flush=True)
-            raise RuntimeError(f"Webhook still active: {webhook_info.url}. Cannot start polling.")
-        
-        print("✅ Confirmed no webhook - starting polling...", flush=True)
-        await dp.start_polling(bot, skip_updates=True)
-        print("Polling started successfully", flush=True)
-    except Exception as e:
-        print(f"❌ Error in polling: {e}", flush=True)
-        raise
-    finally:
-        await bot.session.close()
+    # Keep the main coroutine alive (webhook handler will process updates)
+    print("[supervisor] ✅ Supervisor is running (webhook mode)", flush=True)
+    await asyncio.Event().wait()  # never finish
 
 if __name__ == "__main__":
     try:
