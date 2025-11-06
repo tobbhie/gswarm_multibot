@@ -18,4 +18,4 @@ RUN mkdir -p /app/configs
 RUN pip install -r requirements.txt
 
 ENV TELEGRAM_BOT_TOKEN=
-CMD ["python", "main.py"]
+CMD ["python", "rollback.py"]
